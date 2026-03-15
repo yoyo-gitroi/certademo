@@ -174,7 +174,7 @@ export default function Dashboard() {
 
     try {
       const formData = new FormData();
-      formData.append('vendorName', vendorName.trim());
+      formData.append('vendor_name', vendorName.trim());
       files.forEach((f) => formData.append('files', f));
 
       const ingestRes = await fetch('/api/pipeline/ingest', {
