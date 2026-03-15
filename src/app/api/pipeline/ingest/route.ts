@@ -1,7 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server';
-import fs from 'fs/promises';
-import path from 'path';
-import { PDFParse } from 'pdf-parse';
 import {
   createVendor,
   createSubmission,
@@ -14,6 +11,73 @@ import {
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 const MAX_FILES = 10;
 const MIN_TEXT_LENGTH = 50;
+
+async function extractTextFromPDF(buffer: Buffer): Promise<string> {
+  try {
+    // Try pdf-parse v2 API first
+    const { PDFParse } = await import('pdf-parse');
+    const parser = new PDFParse({ data: buffer });
+    const textResult = await parser.getText();
+    await parser.destroy();
+    return textResult.text?.trim() || '';
+  } catch {
+    // Fallback: basic PDF text extraction without pdfjs-dist
+    const text = extractTextBasic(buffer);
+    return text;
+  }
+}
+
+function extractTextBasic(buffer: Buffer): string {
+  // Basic PDF text extraction - extracts text between BT/ET markers
+  // and parenthesized strings. Not perfect but works as a fallback.
+  const content = buffer.toString('latin1');
+  const textParts: string[] = [];
+
+  // Extract text from stream objects
+  const streamRegex = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
+  let match;
+  while ((match = streamRegex.exec(content)) !== null) {
+    const stream = match[1];
+    // Look for text showing operators: Tj, TJ, ', "
+    const tjRegex = /\(([^)]*)\)\s*Tj/g;
+    let tjMatch;
+    while ((tjMatch = tjRegex.exec(stream)) !== null) {
+      textParts.push(tjMatch[1]);
+    }
+
+    // Look for TJ arrays
+    const tjArrayRegex = /\[([^\]]*)\]\s*TJ/g;
+    let tjArrayMatch;
+    while ((tjArrayMatch = tjArrayRegex.exec(stream)) !== null) {
+      const items = tjArrayMatch[1];
+      const strRegex = /\(([^)]*)\)/g;
+      let strMatch;
+      while ((strMatch = strRegex.exec(items)) !== null) {
+        textParts.push(strMatch[1]);
+      }
+    }
+  }
+
+  // Also try to get text from outside streams (simple PDFs)
+  const simpleTextRegex = /\(([^)]{3,})\)\s*Tj/g;
+  while ((match = simpleTextRegex.exec(content)) !== null) {
+    if (!textParts.includes(match[1])) {
+      textParts.push(match[1]);
+    }
+  }
+
+  return textParts
+    .map(t => t
+      .replace(/\\n/g, '\n')
+      .replace(/\\r/g, '\r')
+      .replace(/\\t/g, '\t')
+      .replace(/\\\(/g, '(')
+      .replace(/\\\)/g, ')')
+      .replace(/\\\\/g, '\\')
+    )
+    .join(' ')
+    .trim();
+}
 
 export async function POST(request: NextRequest) {
   const startTime = Date.now();
@@ -74,7 +138,6 @@ export async function POST(request: NextRequest) {
 
     // Validate each file
     for (const file of files) {
-      // Check file type is PDF
       const fileName = file.name.toLowerCase();
       if (!fileName.endsWith('.pdf')) {
         return NextResponse.json(
@@ -83,7 +146,6 @@ export async function POST(request: NextRequest) {
         );
       }
 
-      // Check file size
       if (file.size > MAX_FILE_SIZE) {
         return NextResponse.json(
           {
@@ -102,10 +164,6 @@ export async function POST(request: NextRequest) {
 
     // Update submission status to processing
     await updateSubmission(submission.id, { status: 'processing' });
-
-    // Create upload directory
-    const uploadDir = path.join('/tmp', 'uploads', submission.id);
-    await fs.mkdir(uploadDir, { recursive: true });
 
     // Log ingest start
     await createAuditLog({
@@ -128,13 +186,12 @@ export async function POST(request: NextRequest) {
       const fileStartTime = Date.now();
 
       try {
-        // Read file buffer
+        // Read file buffer (in-memory, no disk write needed)
         const arrayBuffer = await file.arrayBuffer();
         const buffer = Buffer.from(arrayBuffer);
 
-        // Save file to disk
-        const filePath = path.join(uploadDir, file.name);
-        await fs.writeFile(filePath, buffer);
+        // Store file path as a reference (not written to disk on Vercel)
+        const filePath = `uploads/${submission.id}/${file.name}`;
 
         // Create document record
         const document = await createDocument(
@@ -146,13 +203,9 @@ export async function POST(request: NextRequest) {
 
         // Extract text from PDF
         try {
-          const parser = new PDFParse({ data: buffer });
-          const textResult = await parser.getText();
-          await parser.destroy();
-          const rawText = textResult.text?.trim() || '';
+          const rawText = await extractTextFromPDF(buffer);
 
           if (rawText.length < MIN_TEXT_LENGTH) {
-            // Text too short - likely a scanned image
             const updatedDoc = await updateDocument(document.id, {
               raw_text: rawText || null,
               extraction_status: 'failed',
@@ -173,7 +226,6 @@ export async function POST(request: NextRequest) {
 
             documents.push(updatedDoc);
           } else {
-            // Successful extraction
             const updatedDoc = await updateDocument(document.id, {
               raw_text: rawText,
               extraction_status: 'pending',
@@ -195,7 +247,6 @@ export async function POST(request: NextRequest) {
             documents.push(updatedDoc);
           }
         } catch (pdfError) {
-          // PDF parsing failed
           const updatedDoc = await updateDocument(document.id, {
             extraction_status: 'failed',
           });
@@ -214,10 +265,8 @@ export async function POST(request: NextRequest) {
           });
 
           documents.push(updatedDoc);
-          // Continue processing other files
         }
       } catch (fileError) {
-        // File processing failed entirely (e.g., write error)
         await createAuditLog({
           submission_id: submission.id,
           step: 'ingest',
@@ -229,7 +278,6 @@ export async function POST(request: NextRequest) {
             duration_ms: Date.now() - fileStartTime,
           },
         });
-        // Continue processing other files
       }
     }
 

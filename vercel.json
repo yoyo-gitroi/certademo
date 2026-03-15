@@ -1,0 +1,16 @@
+{
+  "functions": {
+    "src/app/api/pipeline/run/route.ts": {
+      "maxDuration": 60
+    },
+    "src/app/api/pipeline/ingest/route.ts": {
+      "maxDuration": 30
+    },
+    "src/app/api/pipeline/classify/route.ts": {
+      "maxDuration": 30
+    },
+    "src/app/api/pipeline/extract/route.ts": {
+      "maxDuration": 30
+    }
+  }
+}
