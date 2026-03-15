@@ -187,14 +187,14 @@ export default function Dashboard() {
         throw new Error(errBody.error ?? `Ingest failed: ${ingestRes.status}`);
       }
 
-      const { submission_Id } = await ingestRes.json();
+      const { submission_id } = await ingestRes.json();
 
       setUploadStatus('Running compliance pipeline...');
 
       const runRes = await fetch('/api/pipeline/run', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ submission_Id }),
+        body: JSON.stringify({ submission_id }),
       });
 
       if (!runRes.ok) {
